@@ -1,0 +1,12 @@
+[package]
+name = "awestruck-printer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+discord-markdown = "0.1.2"
+dotenvy_macro = "0.15.7"
+genpdf = "0.2.0"
+printers = "2.0.0"
+serenity = { version = "0.12", features = ["chrono"] }
+tokio = { version = "1.21.2", features = ["macros", "rt-multi-thread"] }
