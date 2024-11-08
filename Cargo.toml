@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-discord-markdown = "0.1.2"
+chrono = "0.4.38"
+comemo = "0.4.0"
+discord-markdown = { git = "https://github.com/FizzyApple12/discord-markdown.git", version = "0.1.2" }
 dotenvy_macro = "0.15.7"
-genpdf = "0.2.0"
+fontdb = "0.22.0"
 printers = "2.0.0"
 serenity = { version = "0.12", features = ["chrono"] }
+time = "0.3.36"
 tokio = { version = "1.21.2", features = ["macros", "rt-multi-thread"] }
+typst = "0.11.1"
+typst-assets = "0.11.1"
+typst-pdf = "0.11.1"
