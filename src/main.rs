@@ -1,65 +1,248 @@
+#![feature(slice_pattern)]
+
 mod renderer;
+mod socket;
 
-use std::{
-    env,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use core::slice::SlicePattern;
+use std::{sync::mpsc, thread};
 
+use deunicode::deunicode;
 use dotenvy_macro::dotenv;
-use renderer::render;
-use serenity::{async_trait, model::channel::Message, prelude::*};
+use escpos::{
+    driver::UsbDriver,
+    printer::Printer,
+    printer_options::PrinterOptions,
+    utils::{DebugMode, Protocol, ESC},
+};
+use renderer::print_message;
+use serde::{Deserialize, Serialize};
+use serenity::{
+    all::{Context, EventHandler, GatewayIntents, Permissions},
+    async_trait,
+    model::channel::Message,
+    prelude::{TypeMap, TypeMapKey},
+    Client,
+};
+use socket::APISocket;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum UnderlineMode {
+    None,
+    Single,
+    Double,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum JustifyMode {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content")]
+pub enum PrinterInstruction {
+    Text(String),
+    Image(String),
+    Reverse(bool),
+    Underline(UnderlineMode),
+    Justify(JustifyMode),
+    Strike(bool),
+    Bold(bool),
+    Italic(bool),
+    PrintCut,
+}
+
+pub type PrinterMessage = Vec<PrinterInstruction>;
 
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn message(&self, context: Context, msg: Message) {
-        if msg.channel_id.get() != dotenv!("CHANNEL_ID").parse::<u64>().unwrap() {
-            return;
-        }
+    async fn message(&self, context: Context, message: Message) {
+        // if message.channel_id.get() != dotenv!("CHANNEL_ID").parse::<u64>().unwrap() {
+        //     return;
+        // }
 
-        let render_result = render(context, msg);
+        println!("lets check");
+        if let Some(guild) = message.guild(&context.cache) {
+            println!("in a guild");
+            if let Some(role) = guild.role_by_name("@everyone") {
+                println!("has @everyone");
+                if !role.has_permission(Permissions::VIEW_CHANNEL) {
+                    println!("can't see!");
 
-        let Ok(render_data) = render_result else {
+                    return;
+                }
+            };
+        };
+
+        let type_map = context.data.as_ref().read().await;
+
+        let Some(printer_channel_reference) = type_map.get::<PrinterChannel>() else {
             return;
         };
 
-        let time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
+        let printer_channel = printer_channel_reference.clone();
 
-        let tmp_file_path = env::current_dir()
-            .unwrap()
-            .join(format!("target/{}.pdf", time));
+        drop(type_map);
 
-        let write_result = std::fs::write(tmp_file_path.clone(), render_data.as_slice());
-
-        if write_result.is_err() {
-            return;
-        }
-
-        // let printers = printers::get_printers();
-
-        // for printer in printers.clone() {
-        //     println!("{:?}", printer);
-
-        //     let _ = printer.print_file(
-        //         tmp_file_path.to_str().unwrap(),
-        //         Some("Awestruck Message!!!"),
-        //     );
-        // }
+        let _ = print_message(&printer_channel, context, message).await;
     }
 }
 
+struct PrinterChannel;
+
+impl TypeMapKey for PrinterChannel {
+    type Value = mpsc::Sender<PrinterMessage>;
+}
+
+pub const CHARS_PER_LINE: u8 = 48;
+
 #[tokio::main]
 async fn main() {
+    let (sender, receiver) = mpsc::channel::<PrinterMessage>();
+
+    thread::spawn(move || {
+        let driver = match UsbDriver::open(0x04B8, 0x0E20, None) {
+            Ok(driver) => driver,
+            Err(error) => {
+                panic!("{:?}", error);
+            }
+        };
+
+        let printer_options = PrinterOptions::new(None, Some(DebugMode::Hex), CHARS_PER_LINE);
+
+        let mut printer = Printer::new(driver, Protocol::default(), Some(printer_options));
+
+        match printer.init() {
+            Ok(printer) => printer,
+            Err(error) => {
+                panic!("{:?}", error);
+            }
+        };
+
+        // let emoji_regex = Regex::new(r"(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])").unwrap();
+
+        loop {
+            let Ok(messages) = receiver.recv() else {
+                continue;
+            };
+
+            println!("printer commands: {:?}", messages);
+
+            let _ = printer.reverse(false);
+            let _ = printer.underline(escpos::utils::UnderlineMode::None);
+            let _ = printer.justify(escpos::utils::JustifyMode::LEFT);
+            let _ = printer.double_strike(false);
+            let _ = printer.bold(false);
+            let _ = printer.custom(&[ESC, 0x35]);
+
+            let mut last_command_was_print = false;
+
+            for message in messages {
+                last_command_was_print = false;
+
+                match message {
+                    PrinterInstruction::Text(text) => {
+                        // for (_, [emoji, lineno, line]) in
+                        //     emoji_regex.captures_iter(&text).map(|c| c.extract())
+                        // {
+                        //     // results.push((path, lineno.parse::<u64>()?, line));
+
+                        //     println!("{:?} {:?} {:?}", emoji, lineno, line);
+                        // }
+
+                        // let _ = printer.write(&deunicode(&emoji_regex.replace_all(&text, "")));
+                        let _ = printer.write(&deunicode(&text));
+                    }
+                    PrinterInstruction::Image(url) => {
+                        let Ok(image) = reqwest::blocking::get(url) else {
+                            continue;
+                        };
+
+                        let Ok(image) = image.bytes() else {
+                            continue;
+                        };
+
+                        let _ = printer.feed();
+                        let _ = printer.bit_image_from_bytes(image.as_slice());
+                    }
+                    PrinterInstruction::Reverse(enabled) => {
+                        let _ = printer.reverse(enabled);
+                    }
+                    PrinterInstruction::Underline(mode) => {
+                        let _ = printer.underline(match mode {
+                            UnderlineMode::None => escpos::utils::UnderlineMode::None,
+                            UnderlineMode::Single => escpos::utils::UnderlineMode::Single,
+                            UnderlineMode::Double => escpos::utils::UnderlineMode::Double,
+                        });
+                    }
+                    PrinterInstruction::Justify(mode) => {
+                        let _ = printer.justify(match mode {
+                            JustifyMode::Left => escpos::utils::JustifyMode::LEFT,
+                            JustifyMode::Center => escpos::utils::JustifyMode::CENTER,
+                            JustifyMode::Right => escpos::utils::JustifyMode::RIGHT,
+                        });
+                    }
+                    PrinterInstruction::Strike(enabled) => {
+                        let _ = printer.double_strike(enabled);
+                    }
+                    PrinterInstruction::Bold(enabled) => {
+                        let _ = printer.bold(enabled);
+                    }
+                    PrinterInstruction::Italic(enabled) => match enabled {
+                        true => {
+                            let _ = printer.custom(&[ESC, 0x34]);
+                        }
+                        false => {
+                            let _ = printer.custom(&[ESC, 0x35]);
+                        }
+                    },
+                    PrinterInstruction::PrintCut => {
+                        let _ = printer.feed();
+                        let _ = printer.partial_cut();
+                        let _ = printer.print();
+                        let _ = printer.debug();
+                        last_command_was_print = true;
+                    }
+                };
+            }
+
+            if !last_command_was_print {
+                let _ = printer.feed();
+                let _ = printer.partial_cut();
+                let _ = printer.print();
+                let _ = printer.debug();
+            }
+        }
+    });
+
+    let api_job_sender = sender.clone();
+    let (mut api_socket, api_receiver) = APISocket::create();
+
+    let _ = thread::spawn(move || loop {
+        let Ok(next_message) = api_receiver.recv() else {
+            continue;
+        };
+
+        println!("from the API: {:?}", next_message);
+
+        let _ = api_job_sender.send(next_message);
+    });
+
+    let _ = thread::spawn(move || api_socket.run());
+
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
+    let mut printer_map = TypeMap::new();
+    printer_map.insert::<PrinterChannel>(sender);
+
     let mut client = Client::builder(dotenv!("BOT_TOKEN"), intents)
         .event_handler(Handler)
+        .type_map(printer_map)
         .await
         .expect("Err creating client");
 

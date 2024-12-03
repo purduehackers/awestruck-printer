@@ -1,277 +1,259 @@
-use chrono::{DateTime, Datelike, Duration, Local, Timelike, Utc};
-use comemo::Prehashed;
 use discord_markdown::parser::{parse, Expression};
-use fontdb::Database;
-use serenity::all::{Context, Message};
-use std::{fs, path::PathBuf, sync::OnceLock};
+use serenity::all::{ArgumentConvert, Channel, Context, Message, Role, User};
+use std::sync::mpsc;
 
-use time::Month;
-use typst::{
-    diag::FileResult,
-    eval::Tracer,
-    foundations::{Bytes, Datetime, Smart},
-    syntax::{FileId, Source, VirtualPath},
-    text::{Font, FontBook, FontInfo},
-    Library, World,
-};
+use crate::{PrinterInstruction, PrinterMessage, UnderlineMode, CHARS_PER_LINE};
 
-pub struct FontSearcher {
-    pub book: FontBook,
-    pub fonts: Vec<FontSlot>,
-}
-
-pub struct FontSlot {
-    path: PathBuf,
-    index: u32,
-    font: OnceLock<Option<Font>>,
-}
-
-impl FontSlot {
-    pub fn get(&self) -> Option<Font> {
-        self.font
-            .get_or_init(|| {
-                let data = fs::read(&self.path).ok()?.into();
-                Font::new(data, self.index)
-            })
-            .clone()
-    }
-}
-
-impl FontSearcher {
-    pub fn new() -> Self {
-        Self {
-            book: FontBook::new(),
-            fonts: vec![],
+async fn render_vec_expr<'a>(
+    printer_commands: &mut PrinterMessage,
+    context: &Context,
+    message: &Message,
+    parsed_content: &[Expression<'a>],
+) {
+    Box::pin(async move {
+        for expression in parsed_content {
+            render_expr(printer_commands, context, message, expression).await;
         }
-    }
+    })
+    .await;
+}
 
-    pub fn search(&mut self) {
-        let mut db = Database::new();
+async fn render_expr<'a>(
+    printer_commands: &mut PrinterMessage,
+    context: &Context,
+    message: &Message,
+    expr: &Expression<'a>,
+) {
+    match expr {
+        Expression::Text(text) => {
+            printer_commands.push(PrinterInstruction::Text((*text).to_owned()));
+        }
+        Expression::CustomEmoji(_, emoji2) => {
+            printer_commands.push(PrinterInstruction::Image(
+                format!("https://cdn.discordapp.com/emojis/{}?size=32", emoji2).to_owned(),
+            ));
+        }
+        Expression::User(user) => {
+            printer_commands.push(PrinterInstruction::Reverse(true));
 
-        db.load_system_fonts();
+            let Ok(user) =
+                User::convert(context, message.guild_id, Some(message.channel_id), user).await
+            else {
+                printer_commands.push(PrinterInstruction::Text("@Unknown User".to_owned()));
 
-        for face in db.faces() {
-            let path = match &face.source {
-                fontdb::Source::File(path) | fontdb::Source::SharedFile(path, _) => path,
-                fontdb::Source::Binary(_) => continue,
+                printer_commands.push(PrinterInstruction::Reverse(false));
+                return;
             };
 
-            let info = db
-                .with_face_data(face.id, FontInfo::new)
-                .expect("database must contain this font");
+            let Some(guild_id) = message.guild_id else {
+                printer_commands.push(PrinterInstruction::Text(
+                    format!("@{}", user.name).to_owned(),
+                ));
 
-            if let Some(info) = info {
-                self.book.push(info);
-                self.fonts.push(FontSlot {
-                    path: path.clone(),
-                    index: face.index,
-                    font: OnceLock::new(),
-                });
-            }
+                printer_commands.push(PrinterInstruction::Reverse(false));
+                return;
+            };
+
+            let name = match user.nick_in(context, guild_id).await {
+                Some(name) => name,
+                None => user.name,
+            };
+
+            printer_commands.push(PrinterInstruction::Text(format!("@{}", name).to_owned()));
+
+            printer_commands.push(PrinterInstruction::Reverse(false));
         }
+        Expression::Role(role) => {
+            printer_commands.push(PrinterInstruction::Reverse(true));
 
-        self.add_embedded();
-    }
+            let Ok(role) =
+                Role::convert(context, message.guild_id, Some(message.channel_id), role).await
+            else {
+                printer_commands.push(PrinterInstruction::Text("@Unknown Role".to_owned()));
 
-    fn add_embedded(&mut self) {
-        for data in typst_assets::fonts() {
-            let buffer = typst::foundations::Bytes::from_static(data);
-            for (i, font) in Font::iter(buffer).enumerate() {
-                self.book.push(font.info().clone());
-                self.fonts.push(FontSlot {
-                    path: PathBuf::new(),
-                    index: i as u32,
-                    font: OnceLock::from(Some(font)),
-                });
-            }
+                printer_commands.push(PrinterInstruction::Reverse(false));
+                return;
+            };
+
+            printer_commands.push(PrinterInstruction::Text(
+                format!("@{}", role.name).to_owned(),
+            ));
+
+            printer_commands.push(PrinterInstruction::Reverse(false));
         }
-    }
-}
+        Expression::Channel(channel) => {
+            printer_commands.push(PrinterInstruction::Reverse(true));
 
-struct CustomWorld {
-    library: Prehashed<Library>,
-    book: Prehashed<FontBook>,
-    fonts: Vec<FontSlot>,
-    main_file: Source,
-}
+            let Ok(channel) =
+                Channel::convert(context, message.guild_id, Some(message.channel_id), channel)
+                    .await
+            else {
+                printer_commands.push(PrinterInstruction::Text("#Unknown Channel".to_owned()));
 
-impl World for CustomWorld {
-    fn library(&self) -> &Prehashed<Library> {
-        &self.library
-    }
+                printer_commands.push(PrinterInstruction::Reverse(false));
+                return;
+            };
 
-    fn book(&self) -> &Prehashed<FontBook> {
-        &self.book
-    }
+            let Some(channel) = channel.clone().guild() else {
+                let Some(channel) = channel.private() else {
+                    printer_commands.push(PrinterInstruction::Text("#Unknown Channel".to_owned()));
 
-    fn main(&self) -> Source {
-        self.main_file.clone()
-    }
+                    printer_commands.push(PrinterInstruction::Reverse(false));
+                    return;
+                };
 
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        if id == self.main_file.id() {
-            FileResult::Ok(self.main_file.clone())
-        } else {
-            FileResult::Err(typst::diag::FileError::NotFound(
-                id.vpath().as_rooted_path().to_path_buf(),
-            ))
+                printer_commands.push(PrinterInstruction::Text(
+                    format!("#{}", channel.name()).to_owned(),
+                ));
+
+                printer_commands.push(PrinterInstruction::Reverse(false));
+                return;
+            };
+
+            printer_commands.push(PrinterInstruction::Text(
+                format!("#{}", channel.name).to_owned(),
+            ));
+
+            printer_commands.push(PrinterInstruction::Reverse(false));
         }
-    }
-
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        FileResult::Err(typst::diag::FileError::NotFound(
-            id.vpath().as_rooted_path().to_path_buf(),
-        ))
-    }
-
-    fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index)?.get()
-    }
-
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
-        if let Some(offset) = offset {
-            let utc: DateTime<Utc> = Utc::now() + Duration::hours(offset);
-
-            Some(
-                Datetime::construct(
-                    Some(utc.year()),
-                    Some(Month::try_from(utc.month() as u8).unwrap()),
-                    Some(utc.day() as u8),
-                    Some(utc.hour() as u8),
-                    Some(utc.minute() as u8),
-                    Some(utc.second() as u8),
-                )
-                .unwrap(),
-            )
-        } else {
-            let local: DateTime<Local> = Local::now();
-
-            Some(
-                Datetime::construct(
-                    Some(local.year()),
-                    Some(Month::try_from(local.month() as u8).unwrap()),
-                    Some(local.day() as u8),
-                    Some(local.hour() as u8),
-                    Some(local.minute() as u8),
-                    Some(local.second() as u8),
-                )
-                .unwrap(),
-            )
+        Expression::Hyperlink(link1, _) => {
+            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
+            printer_commands.push(PrinterInstruction::Text(link1.to_string()));
+            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
         }
-    }
-}
-
-impl CustomWorld {
-    fn new(file: String) -> CustomWorld {
-        let mut fonts = FontSearcher::new();
-        fonts.search();
-
-        CustomWorld {
-            library: Prehashed::new(Library::default()),
-            book: Prehashed::new(fonts.book),
-            fonts: fonts.fonts,
-            main_file: Source::new(FileId::new_fake(VirtualPath::new("/")), file),
-        }
-    }
-}
-
-fn render_vec_expr(doc: &mut String, context: &Context, parsed_content: &[Expression]) {
-    for expression in parsed_content {
-        render_expr(doc, context, expression);
-    }
-}
-
-fn render_expr(doc: &mut String, context: &Context, expr: &Expression) {
-    match expr {
-        Expression::Text(text) => *doc += text,
-        Expression::CustomEmoji(_, emoji2) => {
-            // *doc += &format!(
-            //     "\n#box(\n  image(\"https://cdn.discordapp.com/emojis/{}\")\n)",
-            //     emoji2
-            // )
-        }
-        Expression::User(user) => *doc += user,
-        Expression::Role(role) => *doc += role,
-        Expression::Channel(channel) => *doc += channel,
-        Expression::Hyperlink(link1, link2) => *doc += &format!(" #link(\"{}\")[{}]", link2, link1),
         Expression::MultilineCode(code) => {
-            *doc += &format!(
-                "\n#block(\n  fill: luma(230),\n  inset: 8pt,\n  radius: 4pt,\n  [{}],\n)\n",
-                code
-            )
+            printer_commands.push(PrinterInstruction::Reverse(true));
+            let mut text_elements: Vec<String> = Vec::new();
+
+            text_elements.push(format!("\n{}", " ".repeat(CHARS_PER_LINE.into())));
+
+            let mut character_index = 0;
+
+            for line in code.split("\n") {
+                text_elements.push("\n  ".to_string());
+
+                let line_length = line.len();
+                let mut characters_printed = 0;
+
+                for char in line.chars() {
+                    text_elements.push(format!("{}", char));
+                    character_index += 1;
+                    characters_printed += 1;
+
+                    if character_index >= CHARS_PER_LINE - 4 && characters_printed < line_length {
+                        character_index = 0;
+
+                        text_elements.push("  \n".to_string());
+                        text_elements.push("  ".to_string());
+                    }
+                }
+
+                text_elements.push("  ".to_string());
+            }
+
+            text_elements.push(" ".repeat((CHARS_PER_LINE - character_index - 4).into()));
+
+            text_elements.push(format!("\n{}\n", " ".repeat(CHARS_PER_LINE.into())));
+
+            printer_commands.push(PrinterInstruction::Text(text_elements.join("")));
+
+            printer_commands.push(PrinterInstruction::Reverse(false));
         }
-        Expression::InlineCode(code) => *doc += &format!("`{}`", code),
+        Expression::InlineCode(code) => {
+            printer_commands.push(PrinterInstruction::Reverse(true));
+            printer_commands.push(PrinterInstruction::Text((*code).to_owned()));
+            printer_commands.push(PrinterInstruction::Reverse(false));
+        }
         Expression::Blockquote(vec) => {
-            *doc += " \\\n\"";
-            render_vec_expr(doc, context, vec);
-            *doc += "\" \\";
+            printer_commands.push(PrinterInstruction::Text("\"".to_owned()));
+            render_vec_expr(printer_commands, context, message, vec).await;
+            printer_commands.push(PrinterInstruction::Text("\"\n".to_owned()));
         }
-        Expression::Spoiler(vec) => {
-            *doc += "#highlight[";
-            render_vec_expr(doc, context, vec);
-            *doc += "]";
+        Expression::Spoiler(_) => {
+            printer_commands.push(PrinterInstruction::Reverse(true));
+            printer_commands.push(PrinterInstruction::Text(" SPOILER ".to_owned()));
+            printer_commands.push(PrinterInstruction::Reverse(false));
         }
         Expression::Underline(vec) => {
-            *doc += "#underline[";
-            render_vec_expr(doc, context, vec);
-            *doc += "]";
+            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
+            render_vec_expr(printer_commands, context, message, vec).await;
+            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
         }
         Expression::Strikethrough(vec) => {
-            *doc += "#strike[";
-            render_vec_expr(doc, context, vec);
-            *doc += "]";
+            printer_commands.push(PrinterInstruction::Strike(true));
+            render_vec_expr(printer_commands, context, message, vec).await;
+            printer_commands.push(PrinterInstruction::Strike(false));
         }
         Expression::Bold(vec) => {
-            *doc += "*";
-            render_vec_expr(doc, context, vec);
-            *doc += "*";
+            printer_commands.push(PrinterInstruction::Bold(true));
+            render_vec_expr(printer_commands, context, message, vec).await;
+            printer_commands.push(PrinterInstruction::Bold(false));
         }
         Expression::Italics(vec) => {
-            *doc += "_";
-            render_vec_expr(doc, context, vec);
-            *doc += "_";
+            printer_commands.push(PrinterInstruction::Italic(true));
+            render_vec_expr(printer_commands, context, message, vec).await;
+            printer_commands.push(PrinterInstruction::Italic(false));
         }
-        Expression::Newline => *doc += " \\",
+        Expression::Newline => {
+            printer_commands.push(PrinterInstruction::Text("\n".to_owned()));
+        }
     };
 }
 
-pub enum RenderError {
-    CompileFailed,
-}
+pub async fn print_message(
+    printer: &mpsc::Sender<PrinterMessage>,
+    context: Context,
+    message: Message,
+) {
+    println!("{:?}", message);
 
-pub fn render(context: Context, msg: Message) -> Result<Vec<u8>, RenderError> {
-    let mut render_result = "".to_string();
+    let context = &context;
+    let message = &message;
 
-    render_vec_expr(&mut render_result, &context, &parse(&msg.content));
-
-    println!("{}", render_result);
-
-    let world = CustomWorld::new(render_result);
-    let mut tracer = Tracer::new();
-
-    let result = typst::compile(&world, &mut tracer);
-
-    let Ok(document) = result else {
-        println!("Compilation Failed: {:?}", result);
-
-        return Err(RenderError::CompileFailed);
+    let author_name = if let Some(guild_id) = message.guild_id {
+        match message.author.nick_in(context, guild_id).await {
+            Some(name) => name,
+            None => message.author.name.clone(),
+        }
+    } else {
+        message.author.name.clone()
     };
 
-    let local: DateTime<Local> = Local::now();
+    let channel_name = if let Ok(channel) = message.channel(context).await {
+        if let Some(channel) = channel.guild() {
+            format!("#{}", channel.name).to_string()
+        } else {
+            "#Unknown Channel".to_string()
+        }
+    } else {
+        "Direct Messages".to_string()
+    };
 
-    Ok(typst_pdf::pdf(
-        &document,
-        Smart::Auto,
-        Some(
-            Datetime::construct(
-                Some(local.year()),
-                Some(Month::try_from(local.month() as u8).unwrap()),
-                Some(local.day() as u8),
-                Some(local.hour() as u8),
-                Some(local.minute() as u8),
-                Some(local.second() as u8),
-            )
-            .unwrap(),
-        ),
-    ))
+    let mut printer_commands = PrinterMessage::new();
+
+    printer_commands.push(PrinterInstruction::Reverse(true));
+    printer_commands.push(PrinterInstruction::Text(
+        format!("@{}", author_name).to_owned(),
+    ));
+    printer_commands.push(PrinterInstruction::Reverse(false));
+
+    printer_commands.push(PrinterInstruction::Text(" in ".to_owned()));
+
+    printer_commands.push(PrinterInstruction::Reverse(true));
+    printer_commands.push(PrinterInstruction::Text(channel_name.to_owned()));
+    printer_commands.push(PrinterInstruction::Reverse(false));
+
+    printer_commands.push(PrinterInstruction::Text("\n\n".to_owned()));
+
+    render_vec_expr(
+        &mut printer_commands,
+        context,
+        message,
+        &parse(&message.content),
+    )
+    .await;
+
+    printer_commands.push(PrinterInstruction::PrintCut);
+
+    let _ = printer.send(printer_commands);
 }

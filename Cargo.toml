@@ -4,15 +4,26 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-chrono = "0.4.38"
-comemo = "0.4.0"
+chrono = "0.4"
 discord-markdown = { git = "https://github.com/FizzyApple12/discord-markdown.git", version = "0.1.2" }
-dotenvy_macro = "0.15.7"
-fontdb = "0.22.0"
-printers = "2.0.0"
-serenity = { version = "0.12", features = ["chrono"] }
-time = "0.3.36"
-tokio = { version = "1.21.2", features = ["macros", "rt-multi-thread"] }
-typst = "0.11.1"
-typst-assets = "0.11.1"
-typst-pdf = "0.11.1"
+dotenvy_macro = "0.15"
+serenity = { version = "0.12", features = [
+    "chrono",
+    "client",
+    "utils",
+    "cache",
+] }
+tokio = { version = "1.41", features = ["macros", "rt-multi-thread"] }
+escpos = { version = "0.13", features = [
+    "barcodes",
+    "codes_2d",
+    "graphics",
+    "usb",
+] }
+lazy_static = "1.5"
+reqwest = { version = "0.12", features = ["blocking"] }
+deunicode = "1.6.0"
+regex = "1.11.1"
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.122"
+websocket = "0.27.1"
