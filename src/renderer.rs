@@ -277,9 +277,17 @@ pub async fn print_message(
     .await;
 
     let attachments = &message.attachments;
+    let stickers = &message.sticker_items;
+
+    for sticker in stickers {
+        if let Some(sticker_url) = &sticker.image_url() {
+            printer_commands.push(PrinterInstruction::Image(
+                sticker_url.to_owned(),
+            ));
+        }
+    }
 
     if let Ok(file_regex) = Regex::new(r"image/") {
-
         for attachment in attachments {
             if let Some(attachment_type) = &attachment.content_type {
                 let Some(_) = file_regex.captures(attachment_type)
