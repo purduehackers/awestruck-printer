@@ -1,4 +1,3 @@
-use deunicode::AsciiChars;
 use discord_markdown::parser::{parse, Expression};
 use regex::Regex;
 use serenity::all::{
@@ -8,11 +7,11 @@ use std::sync::mpsc;
 
 use crate::{PrinterInstruction, PrinterMessage, UnderlineMode, CHARS_PER_LINE};
 
-async fn render_vec_expr<'a>(
+async fn render_vec_expr(
     printer_commands: &mut PrinterMessage,
     context: &Context,
     message: &Message,
-    parsed_content: &[Expression<'a>],
+    parsed_content: &[Expression<'_>],
 ) {
     Box::pin(async move {
         for expression in parsed_content {
@@ -22,11 +21,11 @@ async fn render_vec_expr<'a>(
     .await;
 }
 
-async fn render_expr<'a>(
+async fn render_expr(
     printer_commands: &mut PrinterMessage,
     context: &Context,
     message: &Message,
-    expr: &Expression<'a>,
+    expr: &Expression<'_>,
 ) {
     match expr {
         Expression::Text(text) => {
@@ -133,7 +132,7 @@ async fn render_expr<'a>(
             printer_commands.push(PrinterInstruction::Reverse(false));
         }
         Expression::Hyperlink(link1, _) => {
-            let Some(caps) = Regex::new(r"\.(jpg|jpeg|png|webp|gif)")
+            let Some(_caps) = Regex::new(r"\.(jpg|jpeg|png|webp|gif)")
                 .unwrap()
                 .captures(link1)
             else {
@@ -143,7 +142,7 @@ async fn render_expr<'a>(
                 return;
             };
 
-            printer_commands.push(PrinterInstruction::Image(format!("{}", link1).to_owned()));
+            printer_commands.push(PrinterInstruction::Image(link1.to_string().to_owned()));
         }
         Expression::MultilineCode(code) => {
             printer_commands.push(PrinterInstruction::Reverse(true));
@@ -279,24 +278,25 @@ pub async fn print_message(
 
     let attachments = &message.attachments;
 
-    for attachment in attachments {
-        if let Some(attachment_type) = &attachment.content_type {
-            let Some(_) = Regex::new(r"image/")
-                .unwrap()
-                .captures(&attachment_type)
-            else {
+    if let Ok(file_regex) = Regex::new(r"image/") {
+
+        for attachment in attachments {
+            if let Some(attachment_type) = &attachment.content_type {
+                let Some(_) = file_regex.captures(attachment_type)
+                else {
+                    printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
+                    printer_commands.push(PrinterInstruction::Text(format!("\n\nFile: {}", attachment.filename.clone())));
+                    printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
+                    continue;
+                };
+    
                 printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
                 printer_commands.push(PrinterInstruction::Text(format!("\n\nFile: {}", attachment.filename.clone())));
                 printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
-                continue;
-            };
-
-            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
-            printer_commands.push(PrinterInstruction::Text(format!("\n\nFile: {}", attachment.filename.clone())));
-            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
-            printer_commands.push(PrinterInstruction::Image(
-                format!("{}", attachment.proxy_url).to_owned(),
-            ));
+                printer_commands.push(PrinterInstruction::Image(
+                    attachment.proxy_url.to_string().to_owned(),
+                ));
+            }
         }
     }
 

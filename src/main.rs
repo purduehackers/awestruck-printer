@@ -6,7 +6,6 @@ mod socket;
 use core::slice::SlicePattern;
 use std::{sync::mpsc, thread};
 
-use deunicode::{deunicode, deunicode_with_tofu};
 use dotenvy_macro::dotenv;
 use escpos::{
     driver::UsbDriver,
@@ -14,7 +13,6 @@ use escpos::{
     printer_options::PrinterOptions,
     utils::{DebugMode, Protocol, ESC},
 };
-use regex::bytes::Regex;
 use renderer::print_message;
 use serde::{Deserialize, Serialize};
 use serenity::{
@@ -149,7 +147,7 @@ async fn main() {
                     PrinterInstruction::Text(text) => {
                         let message_bytes = text.as_bytes();
                         let message_len = message_bytes.len();
-                        let mut i = 0 as usize;
+                        let mut i = 0_usize;
 
                         while i < message_len {
                             let curr_byte = message_bytes[i];
@@ -163,7 +161,7 @@ async fn main() {
 
                                 curr_char = full_char;
                                 i += 1;
-                            } else if curr_byte >= 0xC0 && curr_byte < 0xE0 {
+                            } else if (0xC0..0xE0).contains(&curr_byte) {
                                 let Ok(full_char) =
                                     String::from_utf8(vec![message_bytes[i], message_bytes[i + 1]])
                                 else {
@@ -172,7 +170,7 @@ async fn main() {
 
                                 curr_char = full_char;
                                 i += 2;
-                            } else if curr_byte >= 0xE0 && curr_byte < 0xF0 {
+                            } else if (0xE0..0xF0).contains(&curr_byte) {
                                 let Ok(full_char) = String::from_utf8(vec![
                                     message_bytes[i],
                                     message_bytes[i + 1],
@@ -197,17 +195,12 @@ async fn main() {
                                 i += 4;
                             }
 
-                            println!("{}", curr_char);
-
                             let Some(png_asset) = PngTwemojiAsset::from_emoji(&curr_char) else {
-                                println!("D:");
                                 let _ = printer.write(&curr_char);
                                 continue;
                             };
 
-                            println!(":D");
-
-                            let png_data: &[u8] = &png_asset;
+                            let png_data: &[u8] = png_asset;
                             let _ = printer.feed();
                             let _ = printer.bit_image_from_bytes(png_data);
                         }
