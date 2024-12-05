@@ -1,5 +1,9 @@
+use deunicode::AsciiChars;
 use discord_markdown::parser::{parse, Expression};
-use serenity::all::{ArgumentConvert, Channel, Context, Message, Role, User};
+use regex::Regex;
+use serenity::all::{
+    ArgumentConvert, Channel, Context, Message, Role, User,
+};
 use std::sync::mpsc;
 
 use crate::{PrinterInstruction, PrinterMessage, UnderlineMode, CHARS_PER_LINE};
@@ -26,13 +30,25 @@ async fn render_expr<'a>(
 ) {
     match expr {
         Expression::Text(text) => {
-            printer_commands.push(PrinterInstruction::Text((*text).to_owned()));
+            //for c in text.chars() {
+            //    printer_commands.push(PrinterInstruction::Text((c).to_string() + "MEOW"));
+            //}
+
+            //for val in text.ascii_chars().map(|ch| ch.unwrap_or("?")) {
+            //    printer_commands.push(PrinterInstruction::Text(((*val).to_owned() + " ").to_owned()));
+            //}
+            printer_commands.push(PrinterInstruction::Text(((*text).to_owned()).to_owned()));
         }
         Expression::CustomEmoji(_, emoji2) => {
             printer_commands.push(PrinterInstruction::Image(
-                format!("https://cdn.discordapp.com/emojis/{}?size=32", emoji2).to_owned(),
+                format!("https://cdn.discordapp.com/emojis/{}?size=64", emoji2).to_owned(),
             ));
         }
+        //Expression::CustomEmoji(_, emoji2) => {
+        //    printer_commands.push(PrinterInstruction::Image(
+        //        format!("https://cdn.discordapp.com/emojis/{}?size=64", emoji2).to_owned(),
+        //    ));
+        //}
         Expression::User(user) => {
             printer_commands.push(PrinterInstruction::Reverse(true));
 
@@ -117,9 +133,17 @@ async fn render_expr<'a>(
             printer_commands.push(PrinterInstruction::Reverse(false));
         }
         Expression::Hyperlink(link1, _) => {
-            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
-            printer_commands.push(PrinterInstruction::Text(link1.to_string()));
-            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
+            let Some(caps) = Regex::new(r"\.(jpg|jpeg|png|webp|gif)")
+                .unwrap()
+                .captures(link1)
+            else {
+                printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
+                printer_commands.push(PrinterInstruction::Text(link1.to_string()));
+                printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
+                return;
+            };
+
+            printer_commands.push(PrinterInstruction::Image(format!("{}", link1).to_owned()));
         }
         Expression::MultilineCode(code) => {
             printer_commands.push(PrinterInstruction::Reverse(true));
@@ -252,6 +276,29 @@ pub async fn print_message(
         &parse(&message.content),
     )
     .await;
+
+    let attachments = &message.attachments;
+
+    for attachment in attachments {
+        if let Some(attachment_type) = &attachment.content_type {
+            let Some(_) = Regex::new(r"image/")
+                .unwrap()
+                .captures(&attachment_type)
+            else {
+                printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
+                printer_commands.push(PrinterInstruction::Text(format!("\n\nFile: {}", attachment.filename.clone())));
+                printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
+                continue;
+            };
+
+            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::Single));
+            printer_commands.push(PrinterInstruction::Text(format!("\n\nFile: {}", attachment.filename.clone())));
+            printer_commands.push(PrinterInstruction::Underline(UnderlineMode::None));
+            printer_commands.push(PrinterInstruction::Image(
+                format!("{}", attachment.proxy_url).to_owned(),
+            ));
+        }
+    }
 
     printer_commands.push(PrinterInstruction::PrintCut);
 

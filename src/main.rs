@@ -6,7 +6,7 @@ mod socket;
 use core::slice::SlicePattern;
 use std::{sync::mpsc, thread};
 
-use deunicode::deunicode;
+use deunicode::{deunicode, deunicode_with_tofu};
 use dotenvy_macro::dotenv;
 use escpos::{
     driver::UsbDriver,
@@ -14,6 +14,7 @@ use escpos::{
     printer_options::PrinterOptions,
     utils::{DebugMode, Protocol, ESC},
 };
+use regex::bytes::Regex;
 use renderer::print_message;
 use serde::{Deserialize, Serialize};
 use serenity::{
@@ -24,6 +25,7 @@ use serenity::{
     Client,
 };
 use socket::APISocket;
+use twemoji_assets::png::PngTwemojiAsset;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum UnderlineMode {
@@ -122,7 +124,7 @@ async fn main() {
             }
         };
 
-        // let emoji_regex = Regex::new(r"(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])").unwrap();
+        //let emoji_regex = Regex::new(r"(\xC2\xA9|\xC2\AE|[\xE2\x80\x80-\xE3\x8C\x8C]|\xED\xA0\xBE[\x80\x80-\xBF\xBF]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])").unwrap();
 
         loop {
             let Ok(messages) = receiver.recv() else {
@@ -145,16 +147,70 @@ async fn main() {
 
                 match message {
                     PrinterInstruction::Text(text) => {
-                        // for (_, [emoji, lineno, line]) in
-                        //     emoji_regex.captures_iter(&text).map(|c| c.extract())
-                        // {
-                        //     // results.push((path, lineno.parse::<u64>()?, line));
+                        let message_bytes = text.as_bytes();
+                        let message_len = message_bytes.len();
+                        let mut i = 0 as usize;
 
-                        //     println!("{:?} {:?} {:?}", emoji, lineno, line);
-                        // }
+                        while i < message_len {
+                            let curr_byte = message_bytes[i];
+                            let mut curr_char = "".to_string();
 
-                        // let _ = printer.write(&deunicode(&emoji_regex.replace_all(&text, "")));
-                        let _ = printer.write(&deunicode(&text));
+                            if curr_byte < 0xC0 {
+                                let Ok(full_char) = String::from_utf8(vec![message_bytes[i]])
+                                else {
+                                    continue;
+                                };
+
+                                curr_char = full_char;
+                                i += 1;
+                            } else if curr_byte >= 0xC0 && curr_byte < 0xE0 {
+                                let Ok(full_char) =
+                                    String::from_utf8(vec![message_bytes[i], message_bytes[i + 1]])
+                                else {
+                                    continue;
+                                };
+
+                                curr_char = full_char;
+                                i += 2;
+                            } else if curr_byte >= 0xE0 && curr_byte < 0xF0 {
+                                let Ok(full_char) = String::from_utf8(vec![
+                                    message_bytes[i],
+                                    message_bytes[i + 1],
+                                    message_bytes[i + 2],
+                                ]) else {
+                                    continue;
+                                };
+
+                                curr_char = full_char;
+                                i += 3;
+                            } else if curr_byte >= 0xF0 {
+                                let Ok(full_char) = String::from_utf8(vec![
+                                    message_bytes[i],
+                                    message_bytes[i + 1],
+                                    message_bytes[i + 2],
+                                    message_bytes[i + 3],
+                                ]) else {
+                                    continue;
+                                };
+
+                                curr_char = full_char;
+                                i += 4;
+                            }
+
+                            println!("{}", curr_char);
+
+                            let Some(png_asset) = PngTwemojiAsset::from_emoji(&curr_char) else {
+                                println!("D:");
+                                let _ = printer.write(&curr_char);
+                                continue;
+                            };
+
+                            println!(":D");
+
+                            let png_data: &[u8] = &png_asset;
+                            let _ = printer.feed();
+                            let _ = printer.bit_image_from_bytes(png_data);
+                        }
                     }
                     PrinterInstruction::Image(url) => {
                         let Ok(image) = reqwest::blocking::get(url) else {
